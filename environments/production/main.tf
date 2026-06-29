@@ -10,45 +10,64 @@
 
 provider "aws" {
   region = var.aws_region
-  default_tags {
-    tags = {
-      Environment = var.environment
-      Project     = "aws-landing-zone"
-      ManagedBy   = "terraform"
-    }
+}
+
+locals {
+  common_tags = {
+    Environment = var.environment
+    Product     = "aws-landing-zone"
   }
 }
 
+# Elastic IPs for NAT Gateways (one per AZ)
+resource "aws_eip" "nat" {
+  count  = length(var.aws_availability_zones)
+  domain = "vpc"
+}
+
+# VPC
 module "vpc" {
-  source   = "../../../modules/vpc"
-  vpc_cidr = var.vpc_cidr
-  environment = var.environment
+  source      = "../../../modules/vpc"
+  cidr        = var.vpc_cidr
+  flow_logs   = false
+  common_tags = local.common_tags
 }
 
-module "public_subnet" {
-  source                = "../../../modules/public-subnet"
-  vpc_id                = module.vpc.vpc_id
-  public_subnet_cidrs   = var.public_subnet_cidrs
-  availability_zones    = var.aws_availability_zones
-  environment           = var.environment
-}
-
-module "private_subnet" {
-  source                = "../../../modules/private-subnet"
-  vpc_id                = module.vpc.vpc_id
-  private_subnet_cidrs  = var.private_subnet_cidrs
-  availability_zones    = var.aws_availability_zones
-  environment           = var.environment
-}
-
+# Internet Gateway
 module "internet_gateway" {
   source      = "../../../modules/internet-gateway"
-  vpc_id      = module.vpc.vpc_id
-  environment = var.environment
+  vpc_id      = module.vpc.id
+  common_tags = local.common_tags
 }
 
+# Public Subnets (one per AZ)
+module "public_subnet" {
+  count               = length(var.aws_availability_zones)
+  source              = "../../../modules/public-subnet"
+  vpc_id              = module.vpc.id
+  cidr_block          = var.public_subnet_cidrs[count.index]
+  availability_zone   = var.aws_availability_zones[count.index]
+  internet_gateway_id = module.internet_gateway.id
+  common_tags         = local.common_tags
+}
+
+# NAT Gateways (one per AZ)
 module "nat_gateway" {
+  count             = length(var.aws_availability_zones)
   source            = "../../../modules/nat-gateway"
-  public_subnet_id  = module.public_subnet.public_subnet_ids[0]
-  environment       = var.environment
+  public_subnet_id  = module.public_subnet[count.index].id
+  eip_allocation_id = aws_eip.nat[count.index].id
+  availability_zone = var.aws_availability_zones[count.index]
+  common_tags       = local.common_tags
+}
+
+# Private Subnets (one per AZ)
+module "private_subnet" {
+  count             = length(var.aws_availability_zones)
+  source            = "../../../modules/private-subnet"
+  vpc_id            = module.vpc.id
+  cidr_block        = var.private_subnet_cidrs[count.index]
+  availability_zone = var.aws_availability_zones[count.index]
+  nat_gateway_id    = module.nat_gateway[count.index].id
+  common_tags       = local.common_tags
 }
